@@ -13,6 +13,7 @@ using EnvDTE80;
 using InheritDocLib;
 using Microsoft.VisualStudio;
 using System.ComponentModel.Design;
+using System.Threading;
 
 namespace InheritDocVsix {
     /// <summary>
@@ -32,14 +33,14 @@ namespace InheritDocVsix {
     /// To get loaded into VS, the package must be referred by &lt;Asset Type="Microsoft.VisualStudio.VsPackage" ...&gt; in .vsixmanifest file.
     /// </para>
     /// </remarks>
-    [PackageRegistration(UseManagedResourcesOnly = true)]
-    [ProvideAutoLoad(UIContextGuids80.SolutionExists)]
+    [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
+    [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
     [InstalledProductRegistration("#110", "#112", "1.0", IconResourceID = 400)] // Info on this package for Help/About
     [Guid(InheritDocPackage.PackageGuidString)]
     [SuppressMessage("StyleCop.CSharp.DocumentationRules", "SA1650:ElementDocumentationMustBeSpelledCorrectly", Justification = "pkgdef, VS and vsixmanifest are valid VS terms")]
     [ProvideOptionPage(typeof(OptionPageGrid), "InheritDoc", "General", 0, 0, true)]
     [ProvideMenuResource("Menus.ctmenu", 1)]
-    public sealed class InheritDocPackage : Package {
+    public sealed class InheritDocPackage : AsyncPackage {
         /// <summary>
         /// InheritDocPackage GUID string.
         /// </summary>
@@ -58,6 +59,7 @@ namespace InheritDocVsix {
 
             OptionPageGrid page = (OptionPageGrid)GetDialogPage(typeof(OptionPageGrid));
             this.buildEventProxy = new BuildEventProxy(this, () => {
+                Microsoft.VisualStudio.Shell.ThreadHelper.ThrowIfNotOnUIThread();
                 if (page.RunWhen == OptionRunWhen.Automatic) {
                     Run(page);
                 }
@@ -70,15 +72,22 @@ namespace InheritDocVsix {
         /// Initialization of the package; this method is called right after the package is sited, so this is the place
         /// where you can put all the initialization code that rely on services provided by VisualStudio.
         /// </summary>
-        protected override void Initialize() {
+        protected override async System.Threading.Tasks.Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress) {
             base.Initialize();
 
-            this.buildEventProxy.Initialize();
-            RunInheritDoc.Initialize(this);
+            // Switches to the UI thread in order to consume some services used in command initialization
+            await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+
+            // Listen to the necessary build events.
+            DTE2 dte = (DTE2)await GetServiceAsync(typeof(SDTE));
+
+            this.buildEventProxy.Initialize(dte);
+            await RunInheritDoc.InitializeAsync(this);
 
         }
 
         public static void Run(OptionPageGrid page) {
+            ThreadHelper.ThrowIfNotOnUIThread();
             var basePath = GetSolutionPath();
             var xmlDocFileNames = string.IsNullOrEmpty(page.XmlDocFileNames) ? GetProjectXmlDocFileNames() : page.XmlDocFileNames;
             var globalSourceXmlFiles = page.GlobalSourceXmlFiles;
@@ -86,6 +95,7 @@ namespace InheritDocVsix {
             var buildOutputPane = GetBuildOutputPane();
             buildOutputPane.Activate();
             InheritDocUtil.Run(basePath: basePath, xmlDocFileNamePatterns: xmlDocFileNames, globalSourceXmlFiles: globalSourceXmlFiles, excludeTypes: excludeTypes, overwriteExisting: page.OverwriteExisting, logger: (logLevel, message) => {
+                Microsoft.VisualStudio.Shell.ThreadHelper.ThrowIfNotOnUIThread();
                 if ((int)logLevel >= (int)page.LogLevel) {
                     buildOutputPane.OutputString($"InheritDoc.{logLevel}:{message}\r\n");
                 }
@@ -93,11 +103,13 @@ namespace InheritDocVsix {
         }
 
         static string GetSolutionPath() {
+            ThreadHelper.ThrowIfNotOnUIThread();
             DTE2 dte = (DTE2)Package.GetGlobalService(typeof(SDTE));
             return Path.GetDirectoryName(dte.Solution.FullName);
         }
 
         static string GetProjectXmlDocFileNames() {
+            ThreadHelper.ThrowIfNotOnUIThread();
             DTE2 dte = (DTE2)Package.GetGlobalService(typeof(SDTE));
             List<string> result = new List<string>();
             foreach (Project project in dte.Solution.Projects) {
@@ -119,6 +131,7 @@ namespace InheritDocVsix {
         }
 
         static IVsOutputWindowPane GetBuildOutputPane() {
+            ThreadHelper.ThrowIfNotOnUIThread();
             IVsOutputWindow outWindow = Package.GetGlobalService(typeof(SVsOutputWindow)) as IVsOutputWindow;
             Guid guid = VSConstants.GUID_BuildOutputWindowPane; //.GUID_OutWindowDebugPane;
             IVsOutputWindowPane buildOutputPane;
@@ -127,6 +140,7 @@ namespace InheritDocVsix {
         }
 
         protected override void Dispose(bool disposing) {
+            ThreadHelper.ThrowIfNotOnUIThread();
             base.Dispose(disposing);
             this.buildEventProxy.Dispose();
         }
@@ -145,9 +159,8 @@ namespace InheritDocVsix {
             this.onSuccessfulSolutionBuild = onSuccessfulSolutionBuild;
         }
 
-        public void Initialize() {
-            // Listen to the necessary build events.
-            DTE2 dte = (DTE2)Package.GetGlobalService(typeof(SDTE));
+        public void Initialize(DTE2 dte) {
+            ThreadHelper.ThrowIfNotOnUIThread();
             dte.Events.BuildEvents.OnBuildBegin += this.BuildEvents_OnBuildBegin;
             dte.Events.BuildEvents.OnBuildDone += BuildEvents_OnBuildDone;
             dte.Events.BuildEvents.OnBuildProjConfigDone += BuildEvents_OnBuildProjConfigDone;
@@ -170,10 +183,11 @@ namespace InheritDocVsix {
         private void BuildEvents_OnBuildDone(EnvDTE.vsBuildScope scope, EnvDTE.vsBuildAction action) {
             if (scope==EnvDTE.vsBuildScope.vsBuildScopeSolution && this.solutionBuildSuccess) {
                 this.onSuccessfulSolutionBuild();
-            } 
+            }
         }
 
         public void Dispose() {
+            ThreadHelper.ThrowIfNotOnUIThread();
             DTE2 dte = (DTE2)Package.GetGlobalService(typeof(SDTE));
             dte.Events.BuildEvents.OnBuildBegin -= this.BuildEvents_OnBuildBegin;
             dte.Events.BuildEvents.OnBuildDone -= BuildEvents_OnBuildDone;

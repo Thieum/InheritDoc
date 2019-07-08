@@ -2,6 +2,7 @@
 using System.ComponentModel.Design;
 
 using EnvDTE;
+using Microsoft;
 using Microsoft.VisualStudio.Shell;
 
 namespace InheritDocVsix {
@@ -22,25 +23,33 @@ namespace InheritDocVsix {
         /// <summary>
         /// VS Package that provides this command, not null.
         /// </summary>
-        private readonly Package package;
+        private readonly AsyncPackage package;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="RunInheritDoc"/> class.
         /// Adds our command handlers for menu (commands must exist in the command table file)
         /// </summary>
         /// <param name="package">Owner package, not null.</param>
-        private RunInheritDoc(Package package) {
-            if (package == null) {
+        private RunInheritDoc(AsyncPackage package)
+        {
+            if (package == null)
+            {
                 throw new ArgumentNullException("package");
             }
-
             this.package = package;
+        }
 
-            if (this.ServiceProvider.GetService(typeof(IMenuCommandService)) is OleMenuCommandService commandService) {
+        private async System.Threading.Tasks.Task InitializeAsync()
+        {
+            if (await this.package.GetServiceAsync(typeof(IMenuCommandService)) is OleMenuCommandService commandService)
+            {
                 var menuCommandID = new CommandID(CommandSet, CommandId);
                 var menuItem = new OleMenuCommand(this.OnClick, menuCommandID);
-                menuItem.BeforeQueryStatus += (sender, evt) => {
-                    DTE service = (DTE)ServiceProvider.GetService(typeof(DTE));
+                menuItem.BeforeQueryStatus += async (sender, evt) =>
+                {
+                    await Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    DTE service =  (DTE) await this.package.GetServiceAsync(typeof(DTE));
+                    Assumes.Present(service);
                     Solution solution = service.Solution;
                     menuItem.Enabled = solution.IsOpen;
                 };
@@ -57,20 +66,12 @@ namespace InheritDocVsix {
         }
 
         /// <summary>
-        /// Gets the service provider from the owner package.
-        /// </summary>
-        private IServiceProvider ServiceProvider {
-            get {
-                return this.package;
-            }
-        }
-
-        /// <summary>
         /// Initializes the singleton instance of the command.
         /// </summary>
         /// <param name="package">Owner package, not null.</param>
-        public static void Initialize(Package package) {
+        public static async System.Threading.Tasks.Task InitializeAsync(AsyncPackage package) {
             Instance = new RunInheritDoc(package);
+            await Instance.InitializeAsync();
         }
 
         /// <summary>
@@ -81,6 +82,7 @@ namespace InheritDocVsix {
         /// <param name="sender">Event sender.</param>
         /// <param name="e">Event args.</param>
         private void OnClick(object sender, EventArgs e) {
+            ThreadHelper.ThrowIfNotOnUIThread();
             OptionPageGrid page = (OptionPageGrid)this.package.GetDialogPage(typeof(OptionPageGrid));
             InheritDocPackage.Run(page);
         }
